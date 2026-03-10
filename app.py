@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from typing import Dict, List, Tuple
 import time
+import numpy as np
 
 # ============================================================================
 # КОНФИГУРАЦИЯ СТРАНИЦЫ
@@ -24,18 +25,37 @@ st.markdown("""
 <style>
     /* Общие стили */
     .main {
-        padding-top: 2rem;
+        padding-top: 0rem;
     }
     
-    /* Липкий хедер с фильтрами */
+    /* Убираем отступы сверху */
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 3rem;
+    }
+    
+    /* ЛИПКИЙ ХЕДЕР С ФИЛЬТРАМИ - ИСПРАВЛЕНО */
     .sticky-header {
+        position: -webkit-sticky;
         position: sticky;
         top: 0;
         z-index: 999;
-        background-color: var(--background-color);
-        padding: 1rem 0 2rem 0;
-        margin-bottom: 2rem;
-        border-bottom: 1px solid rgba(250, 250, 250, 0.1);
+        background-color: #0E1117;
+        padding: 1.5rem 0 1.5rem 0;
+        margin: -1rem -5rem 2rem -5rem;
+        padding-left: 5rem;
+        padding-right: 5rem;
+        border-bottom: 2px solid rgba(255, 107, 53, 0.3);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    }
+    
+    /* Для светлой темы */
+    @media (prefers-color-scheme: light) {
+        .sticky-header {
+            background-color: #FFFFFF;
+            border-bottom: 2px solid rgba(255, 107, 53, 0.3);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
     }
     
     /* Карточки метрик */
@@ -211,17 +231,27 @@ st.markdown("""
         .metric-value {
             color: #1a1a1a;
         }
+        
+        .bias-school-name {
+            color: #1a1a1a;
+        }
     }
     
-    /* Скрыть индексы строк в dataframe */
-    .dataframe tbody tr th {
-        display: none;
-    }
+    /* Скрыть меню Streamlit */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     
     /* Стили для selectbox */
     .stSelectbox > div > div {
         background-color: rgba(30, 33, 39, 0.8);
         border-radius: 8px;
+    }
+    
+    /* Фиксация отступов для липкого хедера */
+    div[data-testid="stVerticalBlock"] > div:has(div.sticky-header) {
+        position: sticky;
+        top: 0;
+        z-index: 999;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -242,12 +272,8 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             'marks.xlsx',
             engine='openpyxl',
             dtype={
-                'Год': 'int16',
-                'Класс': 'int8',
-                'Предмет': 'category',
-                'Муниципалитет': 'category',
-                'Логин': 'category',
-                'ОО': 'string',
+                'Год': 'int32',
+                'Класс': 'int32',
                 'Кол-во участников': 'int32'
             }
         )
@@ -256,12 +282,8 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             'scores.xlsx',
             engine='openpyxl',
             dtype={
-                'Год': 'int16',
-                'Класс': 'int8',
-                'Предмет': 'category',
-                'Муниципалитет': 'category',
-                'Логин': 'category',
-                'ОО': 'string',
+                'Год': 'int32',
+                'Класс': 'int32',
                 'Кол-во участников': 'int32'
             }
         )
@@ -270,10 +292,7 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             'bias.xlsx',
             engine='openpyxl',
             dtype={
-                'Год': 'int16',
-                'Логин': 'category',
-                'Муниципалитет': 'category',
-                'ОО': 'string'
+                'Год': 'int32'
             }
         )
         
@@ -281,6 +300,15 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         marks.columns = marks.columns.str.strip()
         scores.columns = scores.columns.str.strip()
         bias.columns = bias.columns.str.strip()
+        
+        # Очистка значений от пробелов для текстовых полей
+        for col in ['Предмет', 'Муниципалитет', 'Логин', 'ОО']:
+            if col in marks.columns:
+                marks[col] = marks[col].astype(str).str.strip()
+            if col in scores.columns:
+                scores[col] = scores[col].astype(str).str.strip()
+            if col in bias.columns:
+                bias[col] = bias[col].astype(str).str.strip()
         
         return marks, scores, bias
         
@@ -301,12 +329,13 @@ def get_filter_options(marks: pd.DataFrame) -> Dict[str, List]:
     }
 
 # ============================================================================
-# ФУНКЦИИ РАСЧЕТА МЕТРИК
+# ФУНКЦИИ РАСЧЕТА МЕТРИК - ИСПРАВЛЕНО
 # ============================================================================
 
 def calculate_metrics(filtered_data: pd.DataFrame) -> Dict[str, float]:
     """
     Рассчитывает метрики: количество ОО, участников, успеваемость и качество.
+    ИСПРАВЛЕНО: Правильный расчет взвешенного среднего.
     """
     if filtered_data.empty:
         return {
@@ -320,44 +349,57 @@ def calculate_metrics(filtered_data: pd.DataFrame) -> Dict[str, float]:
     schools_count = filtered_data['Логин'].nunique()
     
     # Общее количество участников
-    total_participants = filtered_data['Кол-во участников'].sum()
+    total_participants = int(filtered_data['Кол-во участников'].sum())
     
-    # Расчет успеваемости (доля оценок 3, 4, 5)
-    success_rate = (
-        filtered_data['3'].sum() + 
-        filtered_data['4'].sum() + 
-        filtered_data['5'].sum()
-    ) / 100  # Делим на 100, т.к. в данных проценты
+    # Расчет взвешенного среднего для успеваемости и качества
+    total_success = 0
+    total_quality = 0
     
-    # Расчет качества (доля оценок 4, 5)
-    quality_rate = (
-        filtered_data['4'].sum() + 
-        filtered_data['5'].sum()
-    ) / 100
+    for _, row in filtered_data.iterrows():
+        participants = row['Кол-во участников']
+        
+        # Успеваемость (3 + 4 + 5) для этой школы
+        school_success = row['3'] + row['4'] + row['5']
+        
+        # Качество (4 + 5) для этой школы
+        school_quality = row['4'] + row['5']
+        
+        # Взвешиваем по количеству участников
+        total_success += school_success * participants
+        total_quality += school_quality * participants
+    
+    # Вычисляем средние
+    success_rate = (total_success / total_participants) if total_participants > 0 else 0
+    quality_rate = (total_quality / total_participants) if total_participants > 0 else 0
     
     return {
         'schools': schools_count,
         'participants': total_participants,
-        'success_rate': success_rate / len(filtered_data) if len(filtered_data) > 0 else 0,
-        'quality_rate': quality_rate / len(filtered_data) if len(filtered_data) > 0 else 0
+        'success_rate': success_rate,
+        'quality_rate': quality_rate
     }
 
 def get_marks_distribution(filtered_data: pd.DataFrame) -> pd.DataFrame:
     """
     Получает распределение оценок для построения графика.
+    ИСПРАВЛЕНО: Взвешенное среднее по количеству участников.
     """
     if filtered_data.empty:
         return pd.DataFrame()
     
-    # Суммируем проценты по всем оценкам
-    marks_sum = filtered_data[['2', '3', '4', '5']].sum()
+    total_participants = filtered_data['Кол-во участников'].sum()
     
-    # Нормализуем на количество школ
-    marks_avg = marks_sum / len(filtered_data)
+    # Взвешенное среднее для каждой оценки
+    marks_weighted = {}
+    for mark in ['2', '3', '4', '5']:
+        weighted_sum = 0
+        for _, row in filtered_data.iterrows():
+            weighted_sum += row[mark] * row['Кол-во участников']
+        marks_weighted[mark] = weighted_sum / total_participants if total_participants > 0 else 0
     
     result = pd.DataFrame({
         'Оценка': ['2', '3', '4', '5'],
-        'Процент': marks_avg.values
+        'Процент': [marks_weighted['2'], marks_weighted['3'], marks_weighted['4'], marks_weighted['5']]
     })
     
     return result
@@ -366,43 +408,61 @@ def get_scores_distribution(scores_data: pd.DataFrame, year: int, class_num: int
                             subject: str, municipality: str, school: str) -> pd.DataFrame:
     """
     Получает распределение первичных баллов.
+    ИСПРАВЛЕНО: Улучшена фильтрация данных.
     """
     # Фильтрация данных
     filtered = scores_data[
         (scores_data['Год'] == year) &
         (scores_data['Класс'] == class_num) &
-        (scores_data['Предмет'] == subject)
-    ]
+        (scores_data['Предмет'].str.strip() == subject.strip())
+    ].copy()
     
     if municipality != 'Все':
-        filtered = filtered[filtered['Муниципалитет'] == municipality]
+        # Убираем префиксы "город" и "г." для сопоставления
+        filtered['Муниципалитет_clean'] = filtered['Муниципалитет'].str.replace('город ', '', regex=False).str.replace('г. ', '', regex=False).str.strip()
+        municipality_clean = municipality.replace('город ', '').replace('г. ', '').strip()
+        filtered = filtered[filtered['Муниципалитет_clean'] == municipality_clean]
     
     if school != 'Все':
-        filtered = filtered[filtered['ОО'] == school]
+        filtered = filtered[filtered['ОО'].str.strip() == school.strip()]
     
     if filtered.empty:
         return pd.DataFrame()
     
     # Определяем колонки с баллами (все числовые колонки после основных)
-    score_columns = [col for col in filtered.columns if col.isdigit()]
+    score_columns = []
+    for col in filtered.columns:
+        try:
+            int(col)
+            score_columns.append(col)
+        except ValueError:
+            continue
     
-    # Суммируем проценты по каждому баллу
-    scores_sum = filtered[score_columns].sum()
+    if not score_columns:
+        return pd.DataFrame()
     
-    # Нормализуем на количество школ
-    scores_avg = scores_sum / len(filtered)
+    # Взвешенное среднее по количеству участников
+    total_participants = filtered['Кол-во участников'].sum()
+    
+    scores_weighted = {}
+    for col in score_columns:
+        weighted_sum = 0
+        for _, row in filtered.iterrows():
+            weighted_sum += row[col] * row['Кол-во участников']
+        scores_weighted[int(col)] = weighted_sum / total_participants if total_participants > 0 else 0
     
     result = pd.DataFrame({
-        'Балл': [int(col) for col in score_columns],
-        'Процент': scores_avg.values
+        'Балл': list(scores_weighted.keys()),
+        'Процент': list(scores_weighted.values())
     })
     
     return result.sort_values('Балл')
 
-def get_bias_data(bias_df: pd.DataFrame, year: int, municipality: str, 
-                  school: str) -> Dict:
+def get_bias_data(bias_df: pd.DataFrame, marks_df: pd.DataFrame, year: int, 
+                  municipality: str, school: str) -> Dict:
     """
     Получает данные по необъективности для выбранной школы и муниципалитета.
+    ИСПРАВЛЕНО: Полностью переработана логика.
     """
     result = {
         'school_markers': 0,
@@ -416,112 +476,114 @@ def get_bias_data(bias_df: pd.DataFrame, year: int, municipality: str,
     if school != 'Все':
         school_bias = bias_df[
             (bias_df['Год'] == year) &
-            (bias_df['ОО'] == school)
+            (bias_df['ОО'].str.strip() == school.strip())
         ]
         
         if not school_bias.empty:
-            result['school_markers'] = int(school_bias['Количество маркеров'].iloc[0])
+            row = school_bias.iloc[0]
+            result['school_markers'] = int(row['Количество маркеров']) if pd.notna(row['Количество маркеров']) else 0
             
             # Определяем предметы с маркерами
             subjects_with_markers = []
-            row = school_bias.iloc[0]
             
-            if pd.notna(row.get('4 РУ')) and row.get('4 РУ') > 0:
-                subjects_with_markers.append('РУ 4')
-            if pd.notna(row.get('4 МА')) and row.get('4 МА') > 0:
-                subjects_with_markers.append('МА 4')
-            if pd.notna(row.get('5 РУ')) and row.get('5 РУ') > 0:
-                subjects_with_markers.append('РУ 5')
-            if pd.notna(row.get('5 МА')) and row.get('5 МА') > 0:
-                subjects_with_markers.append('МА 5')
+            subject_map = {
+                '4 РУ': 'РУ 4',
+                '4 МА': 'МА 4',
+                '5 РУ': 'РУ 5',
+                '5 МА': 'МА 5'
+            }
+            
+            for col, label in subject_map.items():
+                if col in row.index and pd.notna(row[col]) and row[col] > 0:
+                    subjects_with_markers.append(label)
             
             result['school_subjects'] = subjects_with_markers
         
         # Проверка попадания школы в необъективность за последние 3 года
         school_bias_3years = bias_df[
             (bias_df['Год'].isin([year, year-1, year-2])) &
-            (bias_df['ОО'] == school)
+            (bias_df['ОО'].str.strip() == school.strip())
         ]
         result['school_in_bias_3years'] = len(school_bias_3years) > 0
     
     # 2. Статистика по муниципалитету за 3 года
-    for y in [year, year-1, year-2]:
-        year_bias = bias_df[bias_df['Год'] == y]
+    for y in [year-2, year-1, year]:
+        year_bias = bias_df[bias_df['Год'] == y].copy()
         
         if municipality != 'Все':
-            year_bias = year_bias[year_bias['Муниципалитет'] == municipality]
+            # Очистка названий муниципалитетов
+            year_bias['Муниципалитет_clean'] = year_bias['Муниципалитет'].str.replace('город ', '', regex=False).str.replace('г. ', '', regex=False).str.strip()
+            municipality_clean = municipality.replace('город ', '').replace('г. ', '').strip()
+            year_bias = year_bias[year_bias['Муниципалитет_clean'] == municipality_clean]
         
         # Количество школ с маркерами
         schools_with_bias = year_bias['Логин'].nunique()
         
         # Общее количество школ (из данных по русскому языку 4 класс)
-        # Эту информацию нужно получить из marks
+        year_marks = marks_df[
+            (marks_df['Год'] == y) &
+            (marks_df['Класс'] == 4) &
+            (marks_df['Предмет'].str.contains('Русский', case=False, na=False))
+        ].copy()
+        
+        if municipality != 'Все':
+            year_marks['Муниципалитет_clean'] = year_marks['Муниципалитет'].str.replace('город ', '', regex=False).str.replace('г. ', '', regex=False).str.strip()
+            municipality_clean = municipality.replace('город ', '').replace('г. ', '').strip()
+            year_marks = year_marks[year_marks['Муниципалитет_clean'] == municipality_clean]
+        
+        total_schools = year_marks['Логин'].nunique()
+        
+        percentage = (schools_with_bias / total_schools * 100) if total_schools > 0 else 0
+        
         result['municipality_stats'].append({
             'year': y,
             'biased_schools': schools_with_bias,
-            'total_schools': 0  # Заполнится позже
+            'total_schools': total_schools,
+            'percentage': percentage
         })
     
     # 3. Список школ с маркерами в текущем году
-    year_bias = bias_df[bias_df['Год'] == year]
+    year_bias = bias_df[bias_df['Год'] == year].copy()
     
     if municipality != 'Все':
-        year_bias = year_bias[year_bias['Муниципалитет'] == municipality]
+        year_bias['Муниципалитет_clean'] = year_bias['Муниципалитет'].str.replace('город ', '', regex=False).str.replace('г. ', '', regex=False).str.strip()
+        municipality_clean = municipality.replace('город ', '').replace('г. ', '').strip()
+        year_bias = year_bias[year_bias['Муниципалитет_clean'] == municipality_clean]
     
     for _, row in year_bias.iterrows():
         subjects = []
-        if pd.notna(row.get('4 РУ')) and row.get('4 РУ') > 0:
-            subjects.append(f"РУ 4 ({int(row['4 РУ'])})")
-        if pd.notna(row.get('4 МА')) and row.get('4 МА') > 0:
-            subjects.append(f"МА 4 ({int(row['4 МА'])})")
-        if pd.notna(row.get('5 РУ')) and row.get('5 РУ') > 0:
-            subjects.append(f"РУ 5 ({int(row['5 РУ'])})")
-        if pd.notna(row.get('5 МА')) and row.get('5 МА') > 0:
-            subjects.append(f"МА 5 ({int(row['5 МА'])})")
         
-        result['biased_schools_list'].append({
-            'name': row['ОО'],
-            'markers': int(row['Количество маркеров']),
-            'subjects': ', '.join(subjects)
-        })
+        subject_map = {
+            '4 РУ': 'РУ 4',
+            '4 МА': 'МА 4',
+            '5 РУ': 'РУ 5',
+            '5 МА': 'МА 5'
+        }
+        
+        for col, label in subject_map.items():
+            if col in row.index and pd.notna(row[col]) and row[col] > 0:
+                count = int(row[col])
+                subjects.append(f"{label} ({count})")
+        
+        markers = int(row['Количество маркеров']) if pd.notna(row['Количество маркеров']) else 0
+        
+        if markers > 0:
+            result['biased_schools_list'].append({
+                'name': row['ОО'],
+                'markers': markers,
+                'subjects': ', '.join(subjects) if subjects else 'Нет данных'
+            })
     
     return result
 
-def fill_total_schools(bias_data: Dict, marks_df: pd.DataFrame, 
-                       municipality: str) -> Dict:
-    """
-    Заполняет информацию об общем количестве школ для расчета процента необъективности.
-    """
-    for stat in bias_data['municipality_stats']:
-        year = stat['year']
-        
-        # Фильтруем marks по году, 4 классу и русскому языку
-        year_marks = marks_df[
-            (marks_df['Год'] == year) &
-            (marks_df['Класс'] == 4) &
-            (marks_df['Предмет'].str.contains('Русский язык', case=False, na=False))
-        ]
-        
-        if municipality != 'Все':
-            year_marks = year_marks[year_marks['Муниципалитет'] == municipality]
-        
-        stat['total_schools'] = year_marks['Логин'].nunique()
-        
-        # Рассчитываем процент
-        if stat['total_schools'] > 0:
-            stat['percentage'] = (stat['biased_schools'] / stat['total_schools']) * 100
-        else:
-            stat['percentage'] = 0
-    
-    return bias_data
-
 # ============================================================================
-# ФУНКЦИИ ПОСТРОЕНИЯ ГРАФИКОВ
+# ФУНКЦИИ ПОСТРОЕНИЯ ГРАФИКОВ - ИСПРАВЛЕНО
 # ============================================================================
 
 def create_marks_chart(data: pd.DataFrame) -> go.Figure:
     """
-    Создает столбчатую диаграмму распределения оценок с Material Design стилистикой.
+    Создает столбчатую диаграмму распределения оценок.
+    ИСПРАВЛЕНО: Убраны десятичные дроби из подписей оценок.
     """
     if data.empty:
         fig = go.Figure()
@@ -540,9 +602,9 @@ def create_marks_chart(data: pd.DataFrame) -> go.Figure:
     
     for i, row in data.iterrows():
         fig.add_trace(go.Bar(
-            x=[row['Оценка']],
+            x=[str(int(float(row['Оценка'])))],  # ИСПРАВЛЕНО: форматируем как целое число
             y=[row['Процент']],
-            name=row['Оценка'],
+            name=str(int(float(row['Оценка']))),
             marker=dict(
                 color=colors[i],
                 line=dict(color='rgba(0,0,0,0.2)', width=1)
@@ -559,7 +621,8 @@ def create_marks_chart(data: pd.DataFrame) -> go.Figure:
             title='Оценка',
             showgrid=False,
             zeroline=False,
-            color='#FAFAFA'
+            color='#FAFAFA',
+            type='category'  # ИСПРАВЛЕНО: категориальная ось
         ),
         yaxis=dict(
             title='Процент учащихся (%)',
@@ -581,6 +644,7 @@ def create_marks_chart(data: pd.DataFrame) -> go.Figure:
 def create_scores_chart(data: pd.DataFrame) -> go.Figure:
     """
     Создает график распределения первичных баллов.
+    ИСПРАВЛЕНО: Правильное отображение оси X с 0 и максимальным баллом.
     """
     if data.empty:
         fig = go.Figure()
@@ -593,13 +657,13 @@ def create_scores_chart(data: pd.DataFrame) -> go.Figure:
         return fig
     
     # Определяем максимальный балл
-    max_score = data['Балл'].max()
-    min_score = data['Балл'].min()
+    max_score = int(data['Балл'].max())
+    min_score = 0  # Всегда начинаем с 0
     
     fig = go.Figure()
     
     fig.add_trace(go.Bar(
-        x=data['Балл'],
+        x=data['Балл'].astype(int),
         y=data['Процент'],
         marker=dict(
             color='#42A5F5',
@@ -608,14 +672,9 @@ def create_scores_chart(data: pd.DataFrame) -> go.Figure:
         hovertemplate='<b>Балл %{x}</b><br>Процент: %{y:.2f}%<extra></extra>'
     ))
     
-    # Настройка оси X с обязательным отображением 0 и максимального балла
-    tickvals = list(range(min_score, max_score + 1))
-    
-    # Убедимся, что 0 и max отображаются
-    if 0 not in tickvals:
-        tickvals = [0] + tickvals
-    if max_score not in tickvals:
-        tickvals.append(max_score)
+    # Создаем список подписей для оси X
+    # Показываем все значения, но выделяем 0 и максимум
+    all_scores = list(range(min_score, max_score + 1))
     
     fig.update_layout(
         title=None,
@@ -624,8 +683,9 @@ def create_scores_chart(data: pd.DataFrame) -> go.Figure:
             showgrid=False,
             zeroline=False,
             color='#FAFAFA',
-            tickmode='array',
-            tickvals=tickvals,
+            tickmode='linear',
+            tick0=0,
+            dtick=1,
             range=[-0.5, max_score + 0.5]
         ),
         yaxis=dict(
@@ -648,6 +708,7 @@ def create_scores_chart(data: pd.DataFrame) -> go.Figure:
 def create_bias_trend_chart(municipality_stats: List[Dict]) -> go.Figure:
     """
     Создает график динамики необъективности за 3 года.
+    ИСПРАВЛЕНО: Убраны десятичные дроби из подписей годов.
     """
     if not municipality_stats:
         fig = go.Figure()
@@ -662,7 +723,7 @@ def create_bias_trend_chart(municipality_stats: List[Dict]) -> go.Figure:
     # Сортируем по годам
     sorted_stats = sorted(municipality_stats, key=lambda x: x['year'])
     
-    years = [str(s['year']) for s in sorted_stats]
+    years = [str(int(s['year'])) for s in sorted_stats]  # ИСПРАВЛЕНО: форматируем как целые числа
     percentages = [s['percentage'] for s in sorted_stats]
     
     # Цвета: последний год - оранжевый, остальные - серые
@@ -689,7 +750,8 @@ def create_bias_trend_chart(municipality_stats: List[Dict]) -> go.Figure:
             title='Год',
             showgrid=False,
             zeroline=False,
-            color='#FAFAFA'
+            color='#FAFAFA',
+            type='category'  # ИСПРАВЛЕНО: категориальная ось
         ),
         yaxis=dict(
             title='Процент ОО (%)',
@@ -750,7 +812,7 @@ def render_metric_card(icon: str, label: str, value: str, subtitle: str):
     </div>
     """, unsafe_allow_html=True)
 
-def render_bias_school_card(bias_data: Dict, school_name: str):
+def render_bias_school_card(bias_data: Dict, school_name: str, selected_year: int):
     """
     Отображает карточку с информацией о маркерах конкретной школы.
     """
@@ -765,7 +827,7 @@ def render_bias_school_card(bias_data: Dict, school_name: str):
     st.markdown(f"""
     <div class="metric-card">
         <span class="metric-icon">🏫</span>
-        <div class="metric-label">АНАЛИЗ ВЫБРАННОЙ ШКОЛЫ ({bias_data.get('school_year', '')})</div>
+        <div class="metric-label">АНАЛИЗ ВЫБРАННОЙ ШКОЛЫ ({selected_year})</div>
         <div class="metric-value">{markers}</div>
         <div class="metric-subtitle">{marker_text}</div>
         <div class="metric-subtitle" style="margin-top: 0.5rem;">
@@ -793,83 +855,84 @@ def main():
     filter_options = get_filter_options(marks_df)
     
     # Убираем анимацию загрузки
-    time.sleep(0.5)  # Небольшая задержка для плавности
+    time.sleep(0.5)
     loading_placeholder.empty()
     
     # Заголовок
     render_header()
     
     # ========================================================================
-    # ЛИПКИЙ ХЕДЕР С ФИЛЬТРАМИ
+    # ЛИПКИЙ ХЕДЕР С ФИЛЬТРАМИ - ИСПРАВЛЕНО
     # ========================================================================
     
-    header_container = st.container()
-    with header_container:
-        st.markdown('<div class="sticky-header">', unsafe_allow_html=True)
+    # Создаем контейнер для липкого хедера
+    st.markdown('<div class="sticky-header">', unsafe_allow_html=True)
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        selected_year = st.selectbox(
+            '📅 ГОД',
+            options=filter_options['years'],
+            key='year_filter',
+            format_func=lambda x: str(int(x))  # ИСПРАВЛЕНО: отображаем как целое число
+        )
+    
+    with col2:
+        selected_class = st.selectbox(
+            '🎓 КЛАСС',
+            options=filter_options['classes'],
+            key='class_filter',
+            format_func=lambda x: str(int(x))  # ИСПРАВЛЕНО: отображаем как целое число
+        )
+    
+    with col3:
+        # Фильтруем предметы по выбранному году и классу
+        available_subjects = sorted(marks_df[
+            (marks_df['Год'] == selected_year) &
+            (marks_df['Класс'] == selected_class)
+        ]['Предмет'].unique())
         
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
-        with col1:
-            selected_year = st.selectbox(
-                '📅 ГОД',
-                options=filter_options['years'],
-                key='year_filter'
+        selected_subject = st.selectbox(
+            '📚 ПРЕДМЕТ',
+            options=available_subjects,
+            key='subject_filter'
+        )
+    
+    with col4:
+        selected_municipality = st.selectbox(
+            '🏛️ МУНИЦИПАЛИТЕТ',
+            options=filter_options['municipalities'],
+            key='municipality_filter'
+        )
+    
+    with col5:
+        # Фильтруем школы по выбранному муниципалитету
+        if selected_municipality == 'Все':
+            available_schools = ['Все'] + sorted(
+                marks_df[
+                    (marks_df['Год'] == selected_year) &
+                    (marks_df['Класс'] == selected_class) &
+                    (marks_df['Предмет'] == selected_subject)
+                ]['ОО'].unique()
+            )
+        else:
+            available_schools = ['Все'] + sorted(
+                marks_df[
+                    (marks_df['Год'] == selected_year) &
+                    (marks_df['Класс'] == selected_class) &
+                    (marks_df['Предмет'] == selected_subject) &
+                    (marks_df['Муниципалитет'] == selected_municipality)
+                ]['ОО'].unique()
             )
         
-        with col2:
-            selected_class = st.selectbox(
-                '🎓 КЛАСС',
-                options=filter_options['classes'],
-                key='class_filter'
-            )
-        
-        with col3:
-            # Фильтруем предметы по выбранному году и классу
-            available_subjects = marks_df[
-                (marks_df['Год'] == selected_year) &
-                (marks_df['Класс'] == selected_class)
-            ]['Предмет'].unique()
-            
-            selected_subject = st.selectbox(
-                '📚 ПРЕДМЕТ',
-                options=sorted(available_subjects),
-                key='subject_filter'
-            )
-        
-        with col4:
-            selected_municipality = st.selectbox(
-                '🏛️ МУНИЦИПАЛИТЕТ',
-                options=filter_options['municipalities'],
-                key='municipality_filter'
-            )
-        
-        with col5:
-            # Фильтруем школы по выбранному муниципалитету
-            if selected_municipality == 'Все':
-                available_schools = ['Все'] + sorted(
-                    marks_df[
-                        (marks_df['Год'] == selected_year) &
-                        (marks_df['Класс'] == selected_class) &
-                        (marks_df['Предмет'] == selected_subject)
-                    ]['ОО'].unique()
-                )
-            else:
-                available_schools = ['Все'] + sorted(
-                    marks_df[
-                        (marks_df['Год'] == selected_year) &
-                        (marks_df['Класс'] == selected_class) &
-                        (marks_df['Предмет'] == selected_subject) &
-                        (marks_df['Муниципалитет'] == selected_municipality)
-                    ]['ОО'].unique()
-                )
-            
-            selected_school = st.selectbox(
-                '🏫 ОРГАНИЗАЦИЯ (ОО)',
-                options=available_schools,
-                key='school_filter'
-            )
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+        selected_school = st.selectbox(
+            '🏫 ОРГАНИЗАЦИЯ (ОО)',
+            options=available_schools,
+            key='school_filter'
+        )
+    
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # ========================================================================
     # ФИЛЬТРАЦИЯ ДАННЫХ
@@ -879,7 +942,7 @@ def main():
         (marks_df['Год'] == selected_year) &
         (marks_df['Класс'] == selected_class) &
         (marks_df['Предмет'] == selected_subject)
-    ]
+    ].copy()
     
     if selected_municipality != 'Все':
         filtered_marks = filtered_marks[
@@ -970,16 +1033,14 @@ def main():
     st.markdown('<div class="section-title" style="margin-top: 2rem;">⚠️ ПРИЗНАКИ НЕОБЪЕКТИВНОСТИ</div>', unsafe_allow_html=True)
     
     # Получаем данные по необъективности
-    bias_data = get_bias_data(bias_df, selected_year, selected_municipality, selected_school)
-    bias_data = fill_total_schools(bias_data, marks_df, selected_municipality)
-    bias_data['school_year'] = selected_year
+    bias_data = get_bias_data(bias_df, marks_df, selected_year, selected_municipality, selected_school)
     
     col1, col2 = st.columns(2)
     
     with col1:
         # Карточка для конкретной школы
         if selected_school != 'Все':
-            render_bias_school_card(bias_data, selected_school)
+            render_bias_school_card(bias_data, selected_school, selected_year)
         else:
             st.markdown("""
             <div class="metric-card">
@@ -1023,7 +1084,7 @@ def main():
         """, unsafe_allow_html=True)
         
         # Строки таблицы
-        for school in bias_data['biased_schools_list']:
+        for school in sorted(bias_data['biased_schools_list'], key=lambda x: x['markers'], reverse=True):
             st.markdown(f"""
             <div class="bias-school-row">
                 <div class="bias-school-name">{school['name']}</div>
@@ -1034,6 +1095,15 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="section-title" style="margin-top: 2rem;">📋 СПИСОК ОО РЕГИОНА С МАРКЕРАМИ НЕОБЪЕКТИВНОСТИ ({selected_year})</div>', unsafe_allow_html=True)
+        st.markdown('<div class="chart-section">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="text-align: center; padding: 2rem; color: rgba(250, 250, 250, 0.5);">
+            ✓ В выбранном муниципалитете нет школ с признаками необъективности
+        </div>
+        """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
     # ========================================================================
